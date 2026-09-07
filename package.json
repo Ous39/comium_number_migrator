@@ -1,0 +1,25 @@
+{
+  "name": "comium-number-migrator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drop-in React Native module that migrates saved Gambian contacts from 7-digit to 9-digit numbers (PURA transition).",
+  "main": "src/modules/gnm/index.ts",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-native": ">=0.72",
+    "expo-contacts": "*",
+    "@react-native-async-storage/async-storage": "*"
+  },
+  "devDependencies": {
+    "@react-native-async-storage/async-storage": "^2.1.0",
+    "@types/react": "^18.3.12",
+    "expo-contacts": "^15.0.0",
+    "react": "^18.3.1",
+    "react-native": "^0.81.0",
+    "typescript": "^5.6.3"
+  }
+}
