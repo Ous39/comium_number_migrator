@@ -33,8 +33,16 @@ export type { GnmTheme } from './theme';
 export { loadRules, refreshRules, BUNDLED_RULES } from './MigrationRules';
 export type { RulesSource } from './MigrationRules';
 
-export { ensureContactsPermission, readContacts } from './ContactScanner';
-export type { ScanProgress } from './ContactScanner';
+export {
+  ensureContactsPermission,
+  getPermissionState,
+  openAppSettings,
+  readContacts,
+  requestContactsPermission,
+} from './ContactScanner';
+export type { PermissionState, ReadContactsResult, ScanProgress } from './ContactScanner';
+
+export { storage, storageIsPersistent } from './safeStorage';
 
 export {
   computePlan,
@@ -50,7 +58,7 @@ export {
 } from './GNMEngine';
 
 export { applyPlan } from './ContactUpdater';
-export type { ApplyProgress } from './ContactUpdater';
+export type { ApplyOptions, ApplyProgress } from './ContactUpdater';
 
 export {
   createBackup,
@@ -58,6 +66,7 @@ export {
   getBackup,
   restoreBackup,
   deleteBackup,
+  backupsArePersistent,
 } from './BackupManager';
 export type { BackupRecord, RestoreProgress } from './BackupManager';
 

@@ -7,8 +7,8 @@
  * run with no connection.
  */
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getConfig } from './config';
+import { storage } from './safeStorage';
 import type { RulesPayload } from './types';
 
 const CACHE_KEY = 'gnm.rules.cache.v1';
@@ -63,7 +63,7 @@ export async function loadRules(opts?: { preferCache?: boolean }): Promise<{ rul
 
   const readCache = async (): Promise<RulesPayload | null> => {
     try {
-      const raw = await AsyncStorage.getItem(CACHE_KEY);
+      const raw = await storage.getItem(CACHE_KEY);
       return raw ? coerce(JSON.parse(raw)) : null;
     } catch {
       return null;
@@ -83,7 +83,7 @@ export async function loadRules(opts?: { preferCache?: boolean }): Promise<{ rul
     if (res.ok) {
       const payload = coerce(await res.json());
       if (hasActiveRules(payload)) {
-        await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(payload)).catch(() => undefined);
+        await storage.setItem(CACHE_KEY, JSON.stringify(payload)).catch(() => undefined);
         return { rules: payload, source: 'network' };
       }
     }
@@ -108,7 +108,7 @@ export async function refreshRules(): Promise<boolean> {
     if (!res.ok) return false;
     const payload = coerce(await res.json());
     if (!hasActiveRules(payload)) return false;
-    await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(payload));
+    await storage.setItem(CACHE_KEY, JSON.stringify(payload));
     return true;
   } catch {
     return false;

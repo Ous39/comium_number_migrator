@@ -1,11 +1,14 @@
 /**
  * BackupManager — a local, restorable snapshot of every contact that is about
- * to change, taken before any write. Stored in AsyncStorage only; nothing
- * leaves the device.
+ * to change, taken before any write. Stored on-device only (AsyncStorage, or an
+ * in-memory fallback for the session); nothing leaves the device.
+ *
+ * Nothing here throws in normal use — createBackup returns '' if it truly
+ * could not persist, and the caller decides whether to continue.
  */
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Contacts from 'expo-contacts';
+import * as ContactsMod from 'expo-contacts';
+import { storage, storageIsPersistent } from './safeStorage';
 import type { BackupSummary, ContactPhone } from './types';
 
 const INDEX_KEY = 'gnm.backups.index.v1';
@@ -27,9 +30,12 @@ export interface BackupRecord {
 
 export type RestoreProgress = { processed: number; total: number };
 
+/** False when backups live only in memory (async-storage missing/unavailable). */
+export const backupsArePersistent = storageIsPersistent;
+
 async function readIndex(): Promise<BackupSummary[]> {
   try {
-    const raw = await AsyncStorage.getItem(INDEX_KEY);
+    const raw = await storage.getItem(INDEX_KEY);
     return raw ? (JSON.parse(raw) as BackupSummary[]) : [];
   } catch {
     return [];
@@ -37,10 +43,13 @@ async function readIndex(): Promise<BackupSummary[]> {
 }
 
 async function writeIndex(list: BackupSummary[]): Promise<void> {
-  await AsyncStorage.setItem(INDEX_KEY, JSON.stringify(list.slice(0, MAX_KEPT))).catch(() => undefined);
+  await storage.setItem(INDEX_KEY, JSON.stringify(list.slice(0, MAX_KEPT)));
 }
 
-/** Snapshot the given contacts (as currently saved) and return a backup id. */
+/**
+ * Snapshot the given contacts (as currently saved) and return a backup id.
+ * Returns '' if the snapshot could not be stored at all.
+ */
 export async function createBackup(
   contacts: { id: string; name: string; phoneNumbers: ContactPhone[] }[],
   label = 'Before migration',
@@ -56,7 +65,18 @@ export async function createBackup(
       phoneNumbers: c.phoneNumbers.map((p) => ({ id: p.id, label: p.label, number: p.number })),
     })),
   };
-  await AsyncStorage.setItem(ITEM_KEY(id), JSON.stringify(record));
+  try {
+    await storage.setItem(ITEM_KEY(id), JSON.stringify(record));
+  } catch {
+    return '';
+  }
+  // verify it can be read back — an in-memory fallback still passes this
+  try {
+    const check = await storage.getItem(ITEM_KEY(id));
+    if (!check) return '';
+  } catch {
+    return '';
+  }
   const index = await readIndex();
   await writeIndex([
     { id, createdAt: record.createdAt, contactCount: record.items.length, label },
@@ -71,7 +91,7 @@ export async function listBackups(): Promise<BackupSummary[]> {
 
 export async function getBackup(id: string): Promise<BackupRecord | null> {
   try {
-    const raw = await AsyncStorage.getItem(ITEM_KEY(id));
+    const raw = await storage.getItem(ITEM_KEY(id));
     return raw ? (JSON.parse(raw) as BackupRecord) : null;
   } catch {
     return null;
@@ -90,6 +110,7 @@ export async function restoreBackup(
   const record = await getBackup(id);
   if (!record) throw new Error('That backup could not be found on this device.');
 
+  const Contacts = ContactsMod as typeof import('expo-contacts');
   let restored = 0;
   let failed = 0;
 
@@ -113,7 +134,7 @@ export async function restoreBackup(
 }
 
 export async function deleteBackup(id: string): Promise<void> {
-  await AsyncStorage.removeItem(ITEM_KEY(id)).catch(() => undefined);
+  await storage.removeItem(ITEM_KEY(id));
   const index = (await readIndex()).filter((b) => b.id !== id);
   await writeIndex(index);
 }

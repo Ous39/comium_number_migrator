@@ -8,9 +8,10 @@
  * configureGNM({ theme }). The host provides navigation/modal chrome.
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  AppState,
   FlatList,
   Platform,
   Pressable,
@@ -24,11 +25,17 @@ import {
   computePlan,
   formatLocalForDisplay,
   normalizeGambianPhone,
+  rulesUsable,
 } from './GNMEngine';
 import { loadRules, RulesSource } from './MigrationRules';
-import { readContacts } from './ContactScanner';
+import {
+  getPermissionState,
+  openAppSettings,
+  PermissionState,
+  readContacts,
+} from './ContactScanner';
 import { applyPlan, ApplyProgress } from './ContactUpdater';
-import { deleteBackup, listBackups, restoreBackup } from './BackupManager';
+import { backupsArePersistent, deleteBackup, listBackups, restoreBackup } from './BackupManager';
 import type {
   ApplyResult,
   BackupSummary,
@@ -49,7 +56,10 @@ export interface GNMScreenProps {
 type View_ =
   | 'intro'
   | 'scanning'
+  | 'permission'
+  | 'empty'
   | 'review'
+  | 'backupWarn'
   | 'applying'
   | 'done'
   | 'error'
@@ -75,6 +85,9 @@ export function GNMScreen({ onClose, onComplete, initialView = 'intro' }: GNMScr
   const [backups, setBackups] = useState<BackupSummary[]>([]);
   const [restoreProg, setRestoreProg] = useState<{ processed: number; total: number } | null>(null);
   const [restoreOutcome, setRestoreOutcome] = useState<{ restored: number; failed: number } | null>(null);
+  const [permState, setPermState] = useState<PermissionState>('undetermined');
+  const [limited, setLimited] = useState(false);
+  const pendingChosen = useRef<MigrationCandidate[]>([]);
 
   const keyOf = (c: MigrationCandidate) =>
     `${c.contactId}:${c.phoneIndex}:${c.originalNumber}:${c.migratedNumber || 'x'}`;
@@ -104,11 +117,25 @@ export function GNMScreen({ onClose, onComplete, initialView = 'intro' }: GNMScr
       setScanText('Loading the numbering rules…');
       const { rules, source } = await loadRules();
       setRulesSource(source);
+      if (!rulesUsable(rules)) {
+        setErrorMsg(
+          'The numbering rules could not be loaded and no offline copy is available. Connect to the internet and try again.',
+        );
+        setView('error');
+        return;
+      }
 
       setScanText('Reading your contacts…');
-      const contacts = await readContacts((p) =>
+      const { contacts, permission, rawCount } = await readContacts((p) =>
         setScanText(`Reading your contacts… ${p.processed} / ${p.total}`),
       );
+      setPermState(permission);
+      setLimited(permission === 'limited');
+
+      if (rawCount === 0 || contacts.length === 0) {
+        setView('empty');
+        return;
+      }
 
       setScanText('Checking against the rules…');
       const nextPlan = computePlan(contacts, rules, mode, cfg.operatorFilter);
@@ -116,10 +143,33 @@ export function GNMScreen({ onClose, onComplete, initialView = 'intro' }: GNMScr
       setSelectedKeys(new Set(nextPlan.candidates.filter((c) => c.status === 'Ready').map(keyOf)));
       setView('review');
     } catch (e: any) {
+      const code = e?.code;
+      if (code === 'permission_blocked') {
+        setPermState('blocked');
+        setView('permission');
+        return;
+      }
+      if (code === 'permission_denied') {
+        setPermState('denied');
+        setView('permission');
+        return;
+      }
       setErrorMsg(e?.message || 'Something went wrong while scanning.');
       setView('error');
     }
   }, [mode, cfg.operatorFilter]);
+
+  // While the permission screen is up, re-check whenever the app returns to the
+  // foreground (the user may have flipped the toggle in Settings) and proceed.
+  useEffect(() => {
+    if (view !== 'permission') return;
+    const sub = AppState.addEventListener('change', async (s) => {
+      if (s !== 'active') return;
+      const now = await getPermissionState();
+      if (now === 'granted' || now === 'limited') startScan();
+    });
+    return () => sub.remove();
+  }, [view, startScan]);
 
   // Recompute when the user flips add/replace on the review screen.
   useEffect(() => {
@@ -145,22 +195,34 @@ export function GNMScreen({ onClose, onComplete, initialView = 'intro' }: GNMScr
   const setAll = (on: boolean) =>
     setSelectedKeys(on ? new Set(readyCandidates.map(keyOf)) : new Set());
 
-  const runMigration = useCallback(async () => {
+  const doApply = useCallback(
+    async (chosen: MigrationCandidate[], allowNoBackup: boolean) => {
+      setView('applying');
+      setApplyProg({ processed: 0, total: chosen.length, updated: 0, skipped: 0, failed: 0 });
+      try {
+        const r = await applyPlan(chosen, mode, { onProgress: setApplyProg, allowNoBackup });
+        setResult(r);
+        setView('done');
+        onComplete?.(r);
+      } catch (e: any) {
+        if (e?.code === 'backup_failed') {
+          pendingChosen.current = chosen;
+          setView('backupWarn');
+          return;
+        }
+        setErrorMsg(e?.message || 'The migration could not be completed.');
+        setView('error');
+      }
+    },
+    [mode, onComplete],
+  );
+
+  const runMigration = useCallback(() => {
     if (!plan) return;
     const chosen = readyCandidates.filter((c) => selectedKeys.has(keyOf(c)));
     if (!chosen.length) return;
-    setView('applying');
-    setApplyProg({ processed: 0, total: chosen.length, updated: 0, skipped: 0, failed: 0 });
-    try {
-      const r = await applyPlan(chosen, mode, setApplyProg);
-      setResult(r);
-      setView('done');
-      onComplete?.(r);
-    } catch (e: any) {
-      setErrorMsg(e?.message || 'The migration could not be completed.');
-      setView('error');
-    }
-  }, [plan, readyCandidates, selectedKeys, mode, onComplete]);
+    doApply(chosen, false);
+  }, [plan, readyCandidates, selectedKeys, doApply]);
 
   const openRestore = useCallback(async () => {
     setBackups(await listBackups());
@@ -227,8 +289,68 @@ export function GNMScreen({ onClose, onComplete, initialView = 'intro' }: GNMScr
         </View>
       )}
 
+      {view === 'permission' && (
+        <ScrollView contentContainerStyle={styles.body}>
+          <Text style={styles.h1}>Allow access to contacts</Text>
+          <Text style={styles.p}>
+            {permState === 'blocked'
+              ? 'Contacts access is turned off for this app. Open Settings, turn on Contacts, then come back — this screen continues on its own.'
+              : 'This needs permission to read your contacts so it can find the numbers that are changing. Your contacts stay on this device and are never uploaded.'}
+          </Text>
+          {permState === 'blocked' ? (
+            <>
+              <PrimaryButton t={t} label="Open Settings" onPress={openAppSettings} />
+              <GhostButton t={t} label="I've turned it on — check again" onPress={startScan} />
+            </>
+          ) : (
+            <>
+              <PrimaryButton t={t} label="Allow and continue" onPress={startScan} />
+              <GhostButton t={t} label="Not now" onPress={onClose} />
+            </>
+          )}
+        </ScrollView>
+      )}
+
+      {view === 'empty' && (
+        <ScrollView contentContainerStyle={styles.body}>
+          <Text style={styles.h1}>No contacts to check</Text>
+          <Text style={styles.p}>
+            {limited
+              ? "You've shared only some contacts with this app, and none of them have a phone number to update. Share more contacts, then scan again."
+              : 'No saved contacts with a phone number were found on this device. Add a contact with a number and scan again.'}
+          </Text>
+          {limited && <PrimaryButton t={t} label="Choose which contacts to share" onPress={openAppSettings} />}
+          <GhostButton t={t} label="Scan again" onPress={startScan} />
+          <GhostButton t={t} label="Close" onPress={onClose} />
+        </ScrollView>
+      )}
+
+      {view === 'backupWarn' && (
+        <ScrollView contentContainerStyle={styles.body}>
+          <Text style={styles.h1}>Backup couldn't be saved</Text>
+          <Text style={styles.p}>
+            A backup of the contacts about to change could not be stored on this device — usually
+            because storage is full. Nothing has been changed yet. Free up some space and try again,
+            or continue without a backup (you won't be able to undo with one tap).
+          </Text>
+          <PrimaryButton t={t} label="Back — I'll free up space" onPress={() => setView('review')} />
+          <GhostButton
+            t={t}
+            label="Continue without a backup"
+            onPress={() => doApply(pendingChosen.current, true)}
+          />
+        </ScrollView>
+      )}
+
       {view === 'review' && plan && (
         <>
+          {limited && (
+            <Pressable onPress={openAppSettings} style={styles.limitedBar}>
+              <Text style={styles.limitedText}>
+                You've shared only some contacts. Tap to choose more.
+              </Text>
+            </Pressable>
+          )}
           <View style={styles.reviewTop}>
             <View style={styles.chipRow}>
               <Chip t={t} tone="primary" label={`${plan.summary.ready} to update`} />
@@ -316,6 +438,11 @@ export function GNMScreen({ onClose, onComplete, initialView = 'intro' }: GNMScr
           <View style={styles.footer}>
             {rulesSource === 'bundled' && (
               <Text style={styles.footerNote}>Using offline rules — connect once to get the latest.</Text>
+            )}
+            {!backupsArePersistent && (
+              <Text style={styles.footerNote}>
+                Backups will only last until you close the app on this device.
+              </Text>
             )}
             <PrimaryButton
               t={t}
@@ -676,6 +803,8 @@ function makeStyles(t: any) {
     centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 12 },
     centeredText: { color: t.subtext, fontSize: 15, textAlign: 'center' },
     reviewTop: { paddingHorizontal: 16, paddingTop: 12, gap: 12, backgroundColor: t.card, borderBottomWidth: 1, borderBottomColor: t.border, paddingBottom: 12 },
+    limitedBar: { backgroundColor: t.warning + '1F', paddingHorizontal: 16, paddingVertical: 8 },
+    limitedText: { color: t.warning, fontSize: 12, fontWeight: '600', textAlign: 'center' },
     chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
     modeRow: {},
     selectRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },

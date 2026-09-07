@@ -51,6 +51,16 @@ Full details, the rules-JSON shape, headless usage, and per-file docs are in
 - Only the numbers the user selected are changed; already-migrated contacts are
   skipped; every write is verified and read-only contacts are reported honestly.
 
+## It never dead-ends
+
+Denied permission → a "why", plus **Open Settings** that auto-resumes when the
+user comes back. Blocked storage → stop before any change, offer *continue
+without a backup*. Rules URL down → last cache, then the bundled PURA snapshot
+(fully offline). `async-storage` missing → in-memory fallback for the session.
+Empty phonebook, a read-only contact, the app backgrounded mid-run — each has a
+clear next step, and re-running is always safe (idempotent). Full table in
+[`src/modules/gnm/README.md`](src/modules/gnm/README.md).
+
 ## Rules
 
 `configureGNM({ rulesUrl })` should point at a JSON endpoint Comium hosts, so the

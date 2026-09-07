@@ -1,44 +1,126 @@
 /**
  * ContactScanner — read-only access to the device phonebook.
  * The only permission this module needs. Nothing here writes or uploads.
+ *
+ * Permission is handled so the flow never dead-ends:
+ *   getPermissionState()      -> what the OS currently allows
+ *   requestContactsPermission -> ask; distinguishes "ask again later" from "blocked"
+ *   openAppSettings()         -> deep link to the app's settings page
  */
 
-import * as Contacts from 'expo-contacts';
+import { Linking, Platform } from 'react-native';
 import type { DeviceContact } from './types';
 
 export type ScanProgress = { processed: number; total: number; percent: number };
 
-/** Ask for Contacts permission if not already granted. Returns whether it is granted. */
+export type PermissionState =
+  | 'granted' // full access
+  | 'limited' // iOS 18 partial access — usable, but the user picked a subset
+  | 'undetermined' // never asked
+  | 'denied' // said no, but we can ask again
+  | 'blocked'; // said no permanently — only Settings can change it
+
+let ContactsMod: typeof import('expo-contacts') | null = null;
+function contacts(): typeof import('expo-contacts') {
+  if (ContactsMod) return ContactsMod;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    ContactsMod = require('expo-contacts');
+  } catch {
+    ContactsMod = null;
+  }
+  if (!ContactsMod || typeof ContactsMod.getContactsAsync !== 'function') {
+    throw new Error(
+      "The contacts module isn't installed in this app. Run:  npx expo install expo-contacts",
+    );
+  }
+  return ContactsMod;
+}
+
+function mapStatus(res: {
+  status: string;
+  canAskAgain?: boolean;
+  accessPrivileges?: string;
+}): PermissionState {
+  if (res.status === 'granted') {
+    return res.accessPrivileges === 'limited' ? 'limited' : 'granted';
+  }
+  if (res.status === 'undetermined') return 'undetermined';
+  // denied
+  return res.canAskAgain === false ? 'blocked' : 'denied';
+}
+
+/** What the OS currently allows, without prompting. */
+export async function getPermissionState(): Promise<PermissionState> {
+  try {
+    return mapStatus(await contacts().getPermissionsAsync());
+  } catch {
+    return 'undetermined';
+  }
+}
+
+/** Prompt for Contacts permission. Safe to call repeatedly. */
+export async function requestContactsPermission(): Promise<PermissionState> {
+  const current = await contacts().getPermissionsAsync();
+  const mappedCurrent = mapStatus(current);
+  if (mappedCurrent === 'granted' || mappedCurrent === 'limited') return mappedCurrent;
+  if (mappedCurrent === 'blocked') return 'blocked';
+  return mapStatus(await contacts().requestPermissionsAsync());
+}
+
+/** Legacy convenience: true when scanning can proceed. */
 export async function ensureContactsPermission(): Promise<boolean> {
-  const current = await Contacts.getPermissionsAsync();
-  if (current.status === 'granted') return true;
-  const requested = await Contacts.requestPermissionsAsync();
-  return requested.status === 'granted';
+  const s = await requestContactsPermission();
+  return s === 'granted' || s === 'limited';
+}
+
+/** Open this app's page in the system Settings so the user can flip the toggle. */
+export async function openAppSettings(): Promise<void> {
+  try {
+    await Linking.openSettings();
+  } catch {
+    if (Platform.OS === 'ios') {
+      await Linking.openURL('app-settings:').catch(() => undefined);
+    }
+  }
 }
 
 function phoneText(p: { number?: string; digits?: string }): string {
   return String(p.number || p.digits || '');
 }
 
+export interface ReadContactsResult {
+  contacts: DeviceContact[];
+  permission: PermissionState;
+  /** Total contact records the OS returned (including any with no phone number). */
+  rawCount: number;
+}
+
 /**
- * Load every contact that has at least one phone number, reduced to
- * `{ id, name, phoneNumbers[] }`. Yields to the event loop periodically so a
- * large phonebook does not freeze the UI. Throws if permission is denied.
+ * Load every contact that has a phone number. Never throws for an empty
+ * phonebook or limited access — inspect the returned `permission` / counts.
+ * Throws only if permission is fully denied/blocked or the native module is
+ * missing, so the screen can route to the right recovery.
  */
-export async function readContacts(onProgress?: (p: ScanProgress) => void): Promise<DeviceContact[]> {
-  const granted = await ensureContactsPermission();
-  if (!granted) {
-    throw new Error(
-      'Contacts permission is required to scan. Your contacts stay on this device and are never uploaded.',
+export async function readContacts(
+  onProgress?: (p: ScanProgress) => void,
+): Promise<ReadContactsResult> {
+  const permission = await requestContactsPermission();
+  if (permission === 'denied' || permission === 'blocked') {
+    const err = new Error(
+      'Contacts permission is required. Your contacts stay on this device and are never uploaded.',
     );
+    (err as any).code = permission === 'blocked' ? 'permission_blocked' : 'permission_denied';
+    throw err;
   }
 
-  const res = await Contacts.getContactsAsync({
+  const C = contacts();
+  const res = await C.getContactsAsync({
     fields: [
-      Contacts.Fields.PhoneNumbers,
-      Contacts.Fields.FirstName,
-      Contacts.Fields.LastName,
-      Contacts.Fields.Company,
+      C.Fields.PhoneNumbers,
+      C.Fields.FirstName,
+      C.Fields.LastName,
+      C.Fields.Company,
     ],
   });
 
@@ -68,10 +150,9 @@ export async function readContacts(onProgress?: (p: ScanProgress) => void): Prom
         total,
         percent: total ? Math.round(((i + 1) / total) * 100) : 100,
       });
-      // let the UI paint
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0)); // let the UI paint
     }
   }
 
-  return out;
+  return { contacts: out, permission, rawCount: total };
 }

@@ -80,23 +80,55 @@ fails the module uses its last cache, then the **bundled** PURA Phase 1 snapshot
 ## Headless (build your own UI)
 
 ```ts
-import { loadRules, readContacts, computePlan, applyPlan } from './modules/gnm';
+import {
+  loadRules, requestContactsPermission, readContacts,
+  computePlan, applyPlan, openAppSettings,
+} from './modules/gnm';
 
-const { rules } = await loadRules();
-const contacts  = await readContacts();
-const plan      = computePlan(contacts, rules, 'add' /* or 'replace' */, ['COMIUM'] /* optional */);
-// plan.candidates: each is 'Ready' | 'Manual Review' | 'Already Updated' | 'Duplicate Pair Found' | 'Skipped'
-const ready     = plan.candidates.filter((c) => c.status === 'Ready');
-const result    = await applyPlan(ready, 'add'); // backs up first, verifies each write
-// result: { updated, skipped, failed, failures[], backupId }
+const perm = await requestContactsPermission();
+if (perm === 'blocked') { await openAppSettings(); return; }
+if (perm === 'denied')  { /* show your own "why we need this" prompt */ return; }
+
+const { rules }                       = await loadRules();          // never throws (bundled fallback)
+const { contacts, permission, rawCount } = await readContacts();    // {} shape, not a bare array
+if (contacts.length === 0) { /* empty phonebook / limited access */ }
+
+const plan   = computePlan(contacts, rules, 'add' /* or 'replace' */, ['COMIUM'] /* optional */);
+// plan.candidates: 'Ready' | 'Manual Review' | 'Already Updated' | 'Duplicate Pair Found' | 'Skipped'
+const ready  = plan.candidates.filter((c) => c.status === 'Ready');
+
+try {
+  const result = await applyPlan(ready, 'add', { onProgress: (p) => {} });
+  // result: { updated, skipped, failed, failures[], backupId }
+} catch (e) {
+  if ((e as any).code === 'backup_failed') {
+    // storage full — ask the user, then retry with { allowNoBackup: true }
+  }
+}
 ```
 
 ## Guarantees
 
 - Contacts are read on-device; the only network call is fetching the rules JSON.
-- A full snapshot of every affected contact is saved (AsyncStorage) **before** any write; `restoreBackup(id)` reverses it.
+- A full snapshot of every affected contact is saved **before** any write; `restoreBackup(id)` reverses it.
 - Only selected `Ready` numbers are touched. Already-migrated contacts are skipped.
 - Each write is read back and verified; a change that did not persist (read-only account contacts) is reported, never counted as success.
+
+## It never gets stuck
+
+Every failure has a way forward, not a dead end:
+
+| Situation | What the screen does |
+|---|---|
+| Permission not yet asked | asks on "Scan"; iOS "limited" access is accepted and flagged |
+| Permission **denied** (can ask again) | a "why we need this" screen with **Allow and continue** |
+| Permission **blocked** (permanently) | **Open Settings**, and it auto-continues when you return with it on |
+| No contacts / no numbers | a plain "nothing to check" screen with *Scan again* / *Close* |
+| Rules URL unreachable | last cache → then the **bundled** PURA snapshot; works fully offline |
+| `@react-native-async-storage/async-storage` missing or failing | falls back to in-memory storage for the session (rules cache + backups still work; a footer note says they won't survive an app restart) |
+| Backup can't be saved (storage full) | stops **before** any change; **Back — free up space** or **Continue without a backup** |
+| A single contact write fails (read-only account) | counted as failed with a clear reason; the rest still migrate |
+| App backgrounded mid-run | re-running is safe — already-migrated contacts are skipped (idempotent) |
 
 ## Files
 

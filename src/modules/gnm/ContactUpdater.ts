@@ -35,16 +35,32 @@ function localSnapshot(phones: ContactPhone[]): string {
     .join(',');
 }
 
+export interface ApplyOptions {
+  onProgress?: (p: ApplyProgress) => void;
+  /**
+   * Proceed even if the pre-migration backup could not be saved. Default false:
+   * applyPlan throws `Error` with `code: 'backup_failed'` so the UI can ask the
+   * user. Pass true only after they have explicitly accepted the risk.
+   */
+  allowNoBackup?: boolean;
+}
+
 /**
  * Apply the selected `Ready` candidates.
  * `mode: 'add'`     keeps the old number and adds the new one.
  * `mode: 'replace'` overwrites the old number in place.
+ *
+ * A backup of every affected contact is taken first. If it cannot be stored and
+ * `allowNoBackup` is not set, nothing is changed and the call throws.
  */
 export async function applyPlan(
   selected: MigrationCandidate[],
   mode: UpdateMode,
-  onProgress?: (p: ApplyProgress) => void,
+  optsOrProgress?: ApplyOptions | ((p: ApplyProgress) => void),
 ): Promise<ApplyResult> {
+  const opts: ApplyOptions =
+    typeof optsOrProgress === 'function' ? { onProgress: optsOrProgress } : optsOrProgress || {};
+  const onProgress = opts.onProgress;
   // group actionable candidates by contact
   const byContact = new Map<string, MigrationCandidate[]>();
   for (const c of selected) {
@@ -76,6 +92,13 @@ export async function applyPlan(
     affected,
     mode === 'replace' ? 'Before replace migration' : 'Before add migration',
   );
+  if (!backupId && !opts.allowNoBackup) {
+    const err = new Error(
+      'A backup could not be saved on this device, so nothing was changed. Free up some storage and try again, or choose to continue without a backup.',
+    );
+    (err as any).code = 'backup_failed';
+    throw err;
+  }
 
   let updated = 0;
   let skipped = 0;
